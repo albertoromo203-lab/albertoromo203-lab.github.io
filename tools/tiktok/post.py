@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Send a finished carousel to the academy's TikTok inbox as a photo post draft.
 
-    py -3 tiktok/post.py send <slug> [--title "..."] [--src DIR] [--caption FILE]
+    py -3 tiktok/post.py send <slug> [--title "..."] [--src DIR] [--caption FILE] [--repo DIR]
     py -3 tiktok/post.py status <publish_id>
 
 This script never decides WHAT to post. The tiktok-poster skill (laptop) and the cloud
@@ -12,12 +12,14 @@ routine pick the Notion rows; this only sends the one it is given.
     and the caption from --caption, default output/<slug>/caption.md;
  2. makes 1080px-wide copies (TikTok accepts at most 1080p): into site/slides/<slug>/ on the
     laptop, into a temporary folder in the cloud;
- 3. pushes them to the GitHub Pages repo in one commit and waits until they are served;
+ 3. pushes them to the GitHub Pages repo in one commit and waits until they are served: through
+    the GitHub API on the laptop, or with git from the checkout given by --repo in the cloud
+    (the cloud's GitHub proxy refuses API writes but allows git push);
  4. asks TikTok to pull them from the verified URL prefix (MEDIA_UPLOAD = inbox draft);
  5. waits for TikTok's answer and prints one JSON line: slug, publish_id, status, fail_reason.
 
 Settings come from .env on the laptop, or from environment variables in the cloud:
-TIKTOK_CLIENT_KEY, TIKTOK_CLIENT_SECRET, GITHUB_TOKEN, GITHUB_REPO, SITE_URL.
+TIKTOK_CLIENT_KEY, TIKTOK_CLIENT_SECRET, SITE_URL, and GITHUB_TOKEN, GITHUB_REPO when there is no --repo.
 The TikTok login comes from tiktok/token.json (laptop, made by connect.py) or, when that file
 does not exist, from TIKTOK_REFRESH_TOKEN (cloud). If TikTok hands back a different refresh
 token, it is written to tiktok/refresh_token.new and the line REFRESH_TOKEN_ROTATED is printed;
@@ -27,6 +29,8 @@ import base64
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -111,6 +115,29 @@ def push(cfg, slug, paths):
     return True
 
 
+def push_git(repo, slug, paths):
+    """Same single commit, made with git in a checkout of the Pages repo (the cloud routine's way)."""
+    def git(*a):
+        r = subprocess.run(["git", "-C", str(repo), *a], capture_output=True, text=True)
+        if r.returncode:
+            sys.exit(f"STOP git {' '.join(a[:2])} failed: {(r.stderr or r.stdout).strip()[-300:]}")
+        return r.stdout
+
+    git("fetch", "-q", "origin", "main")
+    git("checkout", "-q", "-B", "tiktok-slides", "FETCH_HEAD")
+    dest = Path(repo) / "slides" / slug
+    dest.mkdir(parents=True, exist_ok=True)
+    for p in paths:
+        shutil.copyfile(p, dest / p.name)
+    git("add", "--", f"slides/{slug}")
+    if not git("status", "--porcelain", "--", f"slides/{slug}").strip():
+        return False  # identical slides are already published
+    git("-c", "user.name=Potochino TikTok poster", "-c", "user.email=albertoromo203-lab@users.noreply.github.com",
+        "commit", "-q", "-m", f"slides: {slug}")
+    git("push", "-q", "origin", "HEAD:main")
+    return True
+
+
 def wait_served(urls, paths, timeout=600):
     """Pages can lag a few minutes; TikTok must find every file, byte for byte, with no redirect."""
     deadline, pending = time.time() + timeout, dict(zip(urls, paths))
@@ -169,9 +196,9 @@ def status(publish_id, token=None):
             "fail_reason": d.get("fail_reason") or ""}
 
 
-def send(slug, title=None, src=None, caption_file=None):
+def send(slug, title=None, src=None, caption_file=None, repo=None):
     cfg = connect.env()
-    for k in ("GITHUB_TOKEN", "GITHUB_REPO", "SITE_URL"):
+    for k in ("SITE_URL",) if repo else ("GITHUB_TOKEN", "GITHUB_REPO", "SITE_URL"):
         if not cfg.get(k):
             sys.exit(f"STOP missing setting {k}")
     src = Path(src) if src else ROOT / "output" / slug
@@ -181,7 +208,10 @@ def send(slug, title=None, src=None, caption_file=None):
     description = fit(caption, 4000)
 
     paths = prepare(slug, src)
-    push(cfg, slug, paths)
+    if repo:
+        push_git(repo, slug, paths)
+    else:
+        push(cfg, slug, paths)
     base = cfg["SITE_URL"].rstrip("/") + f"/slides/{slug}/"
     urls = [base + p.name for p in paths]
     wait_served(urls, paths)
@@ -217,7 +247,7 @@ if __name__ == "__main__":
     sys.stdout.reconfigure(encoding="utf-8")
     args = sys.argv[1:]
     if len(args) >= 2 and args[0] == "send":
-        send(args[1], opt(args, "--title"), opt(args, "--src"), opt(args, "--caption"))
+        send(args[1], opt(args, "--title"), opt(args, "--src"), opt(args, "--caption"), opt(args, "--repo"))
     elif len(args) == 2 and args[0] == "status":
         print(json.dumps(status(args[1])))
     else:
