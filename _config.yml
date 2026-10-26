@@ -1,4 +1,3 @@
-# GitHub Pages: publish the site and slides, not the poster's scripts or the marketing notes.
+# GitHub Pages: publish the site and slides, not the poster's scripts.
 exclude:
   - tools
-  - marketing-efectivo
